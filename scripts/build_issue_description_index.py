@@ -1,11 +1,14 @@
 import re
 from collections import deque
 from functools import partial
+from os.path import split
 
+import faiss
 import pandas as pd
 from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, T5EncoderModel
-import faiss
+#import faiss
+from pymilvus import MilvusClient, DataType
 import torch
 import numpy as np
 
@@ -15,7 +18,7 @@ def fetch_embedding_model_and_tokenizer():
     return model, tokenizer
 
 def fetch_swe_bench_verified() -> Dataset:
-    return load_dataset("princeton-nlp/SWE-bench_Verified")
+    return load_dataset("princeton-nlp/SWE-bench_Verified", split='test')
 
 def _count_tokens(batch):
     return {'tokens_in_problem_statement': [len(sample) for sample in batch['input_ids']]}
@@ -123,7 +126,7 @@ def main():
 
     # 2. Extract `instance_id` and `problem_statement` from it
     swe_bench_verified = swe_bench_verified.remove_columns(
-        [column for column in swe_bench_verified.column_names['test'] if column not in ['instance_id', 'problem_statement']]
+        [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
     )
 
     # 3. Setup embedding model (CodeT5-base) from HF
@@ -143,24 +146,30 @@ def main():
         model=code_t5)
 
     swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
+    swe_bench_verified = swe_bench_verified.rename_column('embedding', 'vector')
+    swe_bench_verified = swe_bench_verified.add_column('id', [i for i in range(swe_bench_verified.num_rows)])
 
-    # 5. Setup FAISS (just empty with right dims) and initialize with embeddings
-    index_dimensions = code_t5.config.d_model
-    faiss_index = faiss.IndexFlatL2(index_dimensions)
-
-    embeddings = np.array(swe_bench_verified['test']['embedding'])
-    faiss_index.add(embeddings)
-    faiss.write_index(faiss_index, 'data/task_embeddings-faiss.index')
-
-    # Reading Note: Read index in again
-    #index = faiss.read_index('data/task_embeddings-faiss.index')
-
-    print(f'Added {faiss_index.ntotal} embeddings to FAISS index.')
-
-    # 7.    i. Extract old trajectories of ACR in LLM format
+    # 5.    i. Extract old trajectories of ACR in LLM format
     #       ii. Populate df with trajectories
 
-    # 8. Persist traj-instance-embedding df
+    # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
+    # TODO 7. Persist trajectory Milvus DB
+    index_dimensions = code_t5.config.d_model
+
+    client = MilvusClient('data/task_embeddings.db')
+    client.create_collection(collection_name='task_embeddings', dimension=index_dimensions)
+    client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_verified])
+
+    # SQL style filtering
+    # Reading Note: Seems like it only returns limit // 2 samples, so just double it to 1000 to consider all
+    # client.load_collection('task_embeddings')
+
+
+    # Reading Note: Read index in again
+    # client = MilvusClient('data/task_embeddings-faiss.db')
+    # client.load_collection('task_embeddings')
+    # client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
+    # Alternatively use get for direct access via index
 
 if __name__ == "__main__":
     main()
