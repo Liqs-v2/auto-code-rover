@@ -113,7 +113,7 @@ def generate_embedding_for_sample(sample, model, tokenizer):
     embeddings = process_chunks(chunks, tokenizer, model)
     embedding = aggregate_embeddings(embeddings)
     return {
-        'embedding': embedding.numpy().flatten()
+        'embedding': embedding.flatten()
     }
 
 
@@ -130,27 +130,32 @@ def main():
     code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
     code_t5.eval()
 
+    # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
     # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
     #                                             batched=True, batch_size=16, add_special_tokens=False)
     #
     # swe_bench_verified = swe_bench_verified.map(_count_tokens, batched=True, batch_size=16)
 
+    # 4. Generate embeddings for problem statements (use HF datasets instead of df here).
     generate_embedding_for_sample_fn = partial(
         generate_embedding_for_sample,
         tokenizer=code_t5_tokenizer,
         model=code_t5)
 
-    # generate_embedding_for_sample(swe_bench_verified['test'][8], code_t5, code_t5_tokenizer)
     swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
 
-    # 4. Setup FAISS (just empty with right dims)
+    # 5. Setup FAISS (just empty with right dims) and initialize with embeddings
     index_dimensions = code_t5.config.d_model
     faiss_index = faiss.IndexFlatL2(index_dimensions)
 
-    # 5. i. Generate embeddings for problem statements (use HF datasets instead of df here). Batch if possible.
-    #    ii. Add this batch's embeddings to FAISS index
+    embeddings = np.array(swe_bench_verified['test']['embedding'])
+    faiss_index.add(embeddings)
+    faiss.write_index(faiss_index, 'data/task_embeddings-faiss.index')
 
-    # 6. Persist FAISS index
+    # Reading Note: Read index in again
+    #index = faiss.read_index('data/task_embeddings-faiss.index')
+
+    print(f'Added {faiss_index.ntotal} embeddings to FAISS index.')
 
     # 7.    i. Extract old trajectories of ACR in LLM format
     #       ii. Populate df with trajectories
