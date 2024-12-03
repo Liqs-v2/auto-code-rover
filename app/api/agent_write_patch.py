@@ -56,7 +56,7 @@ def run_with_retries(
     message_thread: MessageThread,
     output_dir: str,
     task: Task,
-    retries=3,
+    retries=1,
     print_callback: Callable[[dict], None] | None = None,
 ) -> tuple[str, float, int, int]:
     """
@@ -123,6 +123,8 @@ def run_with_retries(
             if globals.enable_validation:
                 # if we have a patch extracted, apply it and validate
 
+                # Reading Note: Here the test suite is called based on the adjusted code
+                # Reading Note: patch_is_correct can serve as a BINARY signal for self-reflection
                 patch_is_correct, err_message, log_file = task.validate(diff_file)
                 shutil.move(log_file, pjoin(output_dir, f"run_test_suite_{i}.log"))
 
@@ -137,6 +139,8 @@ def run_with_retries(
                         print_callback=print_callback,
                     )
                     can_stop = True
+
+                    # Reading Note: Hook up to vector db to store trajectory and task description
                 # the following two branches cannot be swapped, because
                 # --enable-perfect-angelic is meant to override --enable-angelic
                 elif globals.enable_perfect_angelic:
@@ -167,6 +171,9 @@ def run_with_retries(
                         "Angelic debugging has not been integrated"
                     )
                 else:
+                    # Reading Note: Failed patch attempt
+                    #   - Hook trajectory and task description into vector DB here
+                    #   - Also set up self-reflection process if ExpeL also uses this
                     result_msg = f"Written an applicable patch, but it did not resolve the issue. {err_message} "
                     result_msg += " Please try again."
                     new_thread.add_user(result_msg)
@@ -213,6 +220,9 @@ def run_with_retries(
 
         else:
             # we dont have a valid patch
+            # Reading Note: Failed patch attempt
+            #   - Hook trajectory and task description into vector DB here
+            #   - Also set up self-reflection process if ExpeL also uses this
             new_prompt = (
                 "Your edit could not be applied to the program. "
                 + extract_msg

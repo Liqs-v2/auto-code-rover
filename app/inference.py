@@ -79,6 +79,7 @@ def start_conversation_round_stratified(
     This version uses json data to process API calls, instead of using the OpenAI function calling.
     Advantage is that multiple API calls can be made in a single round.
     """
+    # Reading Note: Wrap in Reflexion loop
     prompt = (
         "Based on the files, classes, methods, and code statements from the issue related to the bug, you can use the following search APIs to get more context of the project."
         "\n- search_class(class_name: str): Search for a class in the codebase"
@@ -94,6 +95,7 @@ def start_conversation_round_stratified(
 
     round_no = start_round_no
 
+    # Reading Note: Starts at round zero and allows up to 16 rounds of conversation
     round_count = range(start_round_no, globals.conv_round_limit + 1)
 
     try_generate_locs = False
@@ -102,6 +104,7 @@ def start_conversation_round_stratified(
             start_round_no, start_round_no + globals.context_generation_limit + 1
         )
 
+    # Reading Note: Overrides round_no from above implicitly
     for round_no in round_count:
         api_manager.start_new_tool_call_layer()
 
@@ -191,8 +194,10 @@ def start_conversation_round_stratified(
                         "patch generation round 1",
                         print_callback=print_callback,
                     )
+                # Reading Note: The loop is broken is enough context is collected. Actual patch generation happens
+                #   below, after the loop and its associated else branch
                 break
-
+            # Reading Note: Not sure I get this part
             msg = "The buggy locations is not precise. You may need to check whether the arguments are correct and search more information."
             msg_thread.add_user(msg)
             print_acr(
@@ -205,6 +210,9 @@ def start_conversation_round_stratified(
         # prepare response from tools
         collated_tool_response = ""
 
+        # Reading Note: Calls the functions that the API parser agent extracted from
+        #   the coding agent's response. The coding agent just passed the result of the
+        #   API calls. The parsing is hidden.
         for api_call in json_api_calls:
             func_name, func_args = parse_function_invocation(api_call)
 
@@ -254,6 +262,7 @@ def start_conversation_round_stratified(
                 f"context retrieval round {round_no}",
                 print_callback=print_callback,
             )
+    # Reading Note: This else block is only run if the loop is not broken via `break`
     else:
         log_msg = "Try writing patch anyway."
         # TODO can be improved more
@@ -270,6 +279,8 @@ def start_conversation_round_stratified(
 
         logger.info(f"Too many rounds. {log_msg}")
 
+    # Reading Note: The round_no from the above loop persists to here. This statement thus means:
+    #   context_retrieval_rounds + 1 (for first generation attempt)
     round_no += 1
 
     if not globals.disable_patch_generation:
@@ -281,10 +292,13 @@ def start_conversation_round_stratified(
 
     if intent:
         api_manager.start_new_tool_call_layer()
+        # Reading Note: The msg_thread is passed to the receiving intent handler
         api_manager.dispatch_intent(intent, msg_thread, print_callback=print_callback)
         logger.info(f"Invoked {intent.func_name}.")
 
     logger.info("Ending workflow.")
+    # Reading Note: And then it is saved to the conversation file. A file may represents
+    #   one context retrieval round or the patch generation (retries are not modelled as rounds explicitly here)
     conversation_file = pjoin(output_dir, f"conversation_round_{round_no}.json")
     msg_thread.save_to_file(conversation_file)
 
