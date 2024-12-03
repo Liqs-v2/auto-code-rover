@@ -1,16 +1,12 @@
 import re
 from collections import deque
 from functools import partial
-from os.path import split
 
-import faiss
-import pandas as pd
-from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer, T5EncoderModel
-#import faiss
-from pymilvus import MilvusClient, DataType
 import torch
-import numpy as np
+from datasets import load_dataset, Dataset
+from pymilvus import MilvusClient
+from transformers import AutoTokenizer, T5EncoderModel
+
 
 def fetch_embedding_model_and_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained("Salesforce/codet5-base")
