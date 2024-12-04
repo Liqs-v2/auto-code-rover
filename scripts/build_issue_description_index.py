@@ -1,7 +1,10 @@
+import json
+import os
 import re
 from collections import deque
 from functools import partial
 
+from app.data_structures import MessageThread
 import torch
 from datasets import load_dataset, Dataset
 from pymilvus import MilvusClient
@@ -13,11 +16,16 @@ def fetch_embedding_model_and_tokenizer():
     model = T5EncoderModel.from_pretrained("Salesforce/codet5-base")
     return model, tokenizer
 
+
 def fetch_swe_bench_verified() -> Dataset:
     return load_dataset("princeton-nlp/SWE-bench_Verified", split='test')
 
+def fetch_swe_bench_lite() -> Dataset:
+    return load_dataset("princeton-nlp/SWE-bench_Lite", split='test')
+
 def _count_tokens(batch):
     return {'tokens_in_problem_statement': [len(sample) for sample in batch['input_ids']]}
+
 
 def split_text_by_paragraphs(text):
     """
@@ -33,7 +41,7 @@ def chunk_paragraphs(paragraphs, tokenizer, chunk_size):
     Combines short paragraphs and splits long paragraphs intelligently.
     """
     chunks = []
-    current_chunk = deque([], maxlen=chunk_size + 2) # Use chunk_size+2, because we will need the special tokens too
+    current_chunk = deque([], maxlen=chunk_size + 2)  # Use chunk_size+2, because we will need the special tokens too
     current_length = 0
 
     for paragraph in paragraphs:
@@ -106,6 +114,7 @@ def aggregate_embeddings(embeddings):
     """
     return torch.mean(torch.stack(embeddings), dim=0)
 
+
 def generate_embedding_for_sample(sample, model, tokenizer):
     paragraphs = split_text_by_paragraphs(sample['problem_statement'])
     chunks = chunk_paragraphs(paragraphs, tokenizer, chunk_size=model.config.n_positions - 2)
@@ -117,55 +126,91 @@ def generate_embedding_for_sample(sample, model, tokenizer):
 
 
 def main():
-    # 1. Load SWE-Bench Verified from HuggingFace
-    swe_bench_verified = fetch_swe_bench_verified()
-
-    # 2. Extract `instance_id` and `problem_statement` from it
-    swe_bench_verified = swe_bench_verified.remove_columns(
-        [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
-    )
-
-    # 3. Setup embedding model (CodeT5-base) from HF
-    code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
-    code_t5.eval()
-
-    # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
-    # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
-    #                                             batched=True, batch_size=16, add_special_tokens=False)
+    # # 1. Load SWE-Bench Verified from HuggingFace
+    # swe_bench_verified = fetch_swe_bench_verified()
     #
-    # swe_bench_verified = swe_bench_verified.map(_count_tokens, batched=True, batch_size=16)
-
-    # 4. Generate embeddings for problem statements (use HF datasets instead of df here).
-    generate_embedding_for_sample_fn = partial(
-        generate_embedding_for_sample,
-        tokenizer=code_t5_tokenizer,
-        model=code_t5)
-
-    swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
-    swe_bench_verified = swe_bench_verified.rename_column('embedding', 'vector')
-    swe_bench_verified = swe_bench_verified.add_column('id', [i for i in range(swe_bench_verified.num_rows)])
-
-    # 5.    i. Extract old trajectories of ACR in LLM format
-    #       ii. Populate df with trajectories
-
-    # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
-    # TODO 7. Persist trajectory Milvus DB
-    index_dimensions = code_t5.config.d_model
-
-    client = MilvusClient('data/task_embeddings.db')
-    client.create_collection(collection_name='task_embeddings', dimension=index_dimensions)
-    client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_verified])
+    # # 2. Extract `instance_id` and `problem_statement` from it
+    # swe_bench_verified = swe_bench_verified.remove_columns(
+    #     [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
+    # )
+    #
+    # # 3. Setup embedding model (CodeT5-base) from HF
+    # code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
+    # code_t5.eval()
+    #
+    # # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
+    # # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
+    # #                                             batched=True, batch_size=16, add_special_tokens=False)
+    # #
+    # # swe_bench_verified = swe_bench_verified.map(_count_tokens, batched=True, batch_size=16)
+    #
+    # # 4. Generate embeddings for problem statements (use HF datasets instead of df here).
+    # generate_embedding_for_sample_fn = partial(
+    #     generate_embedding_for_sample,
+    #     tokenizer=code_t5_tokenizer,
+    #     model=code_t5)
+    #
+    # # swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
+    # # swe_bench_verified = swe_bench_verified.rename_column('embedding', 'vector')
+    # # swe_bench_verified = swe_bench_verified.add_column('id', [i for i in range(swe_bench_verified.num_rows)])
+    #
+    # # 5.    i. Extract old trajectories of ACR in LLM format
+    # #       ii. Populate df with trajectories
+    # # TODO get successful trajectories from ACR on SWE-Bench Lite
+    # #   Filter out astropy, pydata/xarray and pylint (broken)
+    # #   simply call the below on each of these repos from results/acr-val-only/new_eval_results/report.json
+    # #   Need to also open the correct final log file from results/acr-val-only/applicable_patch
+    # report_results = None
+    # excluded_repos = ['astropy', 'xarray', 'pylint']
+    # with open('../results/acr-val-only/new_eval_results/report.json') as f:
+    #     report_results = json.load(f)
+    #     resolved_repositories = report_results['resolved']
+    #     resolved_repositories = [repo for repo in resolved_repositories if not \
+    #         any(excluded_repo in repo for excluded_repo in excluded_repos)]
+    #
+    # # Load SWE-Bench Lite and process only resolved trajectories
+    # swe_bench_lite = fetch_swe_bench_lite()
+    # swe_bench_lite = swe_bench_lite.remove_columns(
+    #     [column for column in swe_bench_lite.column_names if column not in ['instance_id', 'problem_statement']]
+    # )
+    #
+    # swe_bench_lite = swe_bench_lite.map(generate_embedding_for_sample_fn, batched=False)
+    # swe_bench_lite = swe_bench_lite.rename_column('embedding', 'vector')
+    # swe_bench_lite = swe_bench_lite.add_column('id', [i for i in range(swe_bench_verified.num_rows, swe_bench_verified.num_rows + swe_bench_lite.num_rows)])
+    #
+    # if not report_results:
+    #     raise RuntimeError('Could not load report results, unable to initialize vector db with old ')
+    # for dirpath, dirnames, filenames in os.walk('../results/acr-val-only/applicable_patch'):
+    #     if any(excluded_repo in dirpath for excluded_repo in excluded_repos):
+    #         continue
+    #
+    #     agent_write_patch_files = [filename for filename in filenames if 'debug_agent_write_patch' in filename]
+    #     max_index = max([int(re.search(r'debug_agent_write_patch_(\d).json', file).group(1)) for file in agent_write_patch_files])
+    #     msg_thread = MessageThread.load_from_file(os.path.join(dirpath, f'debug_agent_write_patch_{max_index}.json'))
+    #     llm_trajectory = msg_thread.to_msg()
+    #
+    #     # TODO Add to vector db
+    #
+    # # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
+    # # TODO 7. Persist trajectory Milvus DB
+    # # TODO If I use SWE-Bench Lite trajectories I also need the SWE-Bench Lite problem statements and embeddings
+    # index_dimensions = code_t5.config.d_model
+    #
+    # client = MilvusClient('data/task_embeddings.db')
+    # client.create_collection(collection_name='task_embeddings', dimension=index_dimensions)
+    # client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_verified])
+    # client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_lite])
 
     # SQL style filtering
     # Reading Note: Seems like it only returns limit // 2 samples, so just double it to 1000 to consider all
     # client.load_collection('task_embeddings')
 
-
     # Reading Note: Read index in again
-    # client = MilvusClient('data/task_embeddings-faiss.db')
-    # client.load_collection('task_embeddings')
-    # client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
+    client = MilvusClient('../data/task_embeddings.db')
+    client.load_collection('task_embeddings')
+    client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
     # Alternatively use get for direct access via index
+
 
 if __name__ == "__main__":
     main()
