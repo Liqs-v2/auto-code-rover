@@ -1,4 +1,3 @@
-import json
 import os
 import re
 from collections import deque
@@ -160,7 +159,7 @@ def main():
     # #       ii. Populate df with trajectories
     resolved_instance_ids = None
     excluded_repos = ['astropy', 'xarray', 'pylint']
-    with open('../results/acr-val-only/new_eval_results/report.json') as f:
+    with open('results/acr-val-only/new_eval_results/report.json') as f:
         resolved_instance_ids = json.load(f)
         resolved_instance_ids = resolved_instance_ids['resolved']
         resolved_instance_ids = [repo for repo in resolved_instance_ids if not \
@@ -181,7 +180,7 @@ def main():
     if not resolved_instance_ids:
         raise RuntimeError('Could not load report results, unable to initialize vector db with old ')
 
-    for dirpath, dirnames, filenames in os.walk('../results/acr-val-only/applicable_patch'):
+    for dirpath, dirnames, filenames in os.walk('results/acr-val-only/applicable_patch'):
         if  any(excluded_repo in dirpath for excluded_repo in excluded_repos) or not filenames:
             continue
 
@@ -201,7 +200,7 @@ def main():
     # # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
     index_dimensions = code_t5.config.d_model
 
-    client = MilvusClient('../data/task_embeddings.db')
+    client = MilvusClient('data/task_embeddings.db')
     client.create_collection(collection_name='swe_bench_verified', dimension=index_dimensions)
     client.insert(collection_name='swe_bench_verified', data=[dict(row) for row in swe_bench_verified])
 
@@ -212,11 +211,16 @@ def main():
     # Reading Note: Seems like it only returns limit // 2 samples, so just double it to 1000 to consider all
     # client.load_collection('task_embeddings')
 
-    # # Reading Note: Read index in again
-    # client = MilvusClient('../data/task_embeddings.db')
-    # client.load_collection('task_embeddings')
+    # Reading Note: Read index in again
+    client = MilvusClient('data/task_embeddings.db')
+    client.load_collection('swe_bench_verified')
+    client.load_collection('swe_bench_lite')
+
+    client.get(collection_name='swe_bench_verified', ids=[0,499])
+    client.get(collection_name='swe_bench_lite', ids=[0, 52])
+
     # client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
-    # # Alternatively use get for direct access via index
+    # Alternatively use get for direct access via index
 
 
 if __name__ == "__main__":
