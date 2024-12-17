@@ -3,11 +3,12 @@ import os
 import re
 from collections import deque
 from functools import partial
+import json
 
 from app.data_structures import MessageThread
 import torch
 from datasets import load_dataset, Dataset
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient, Collection, connections
 from transformers import AutoTokenizer, T5EncoderModel
 
 
@@ -126,90 +127,96 @@ def generate_embedding_for_sample(sample, model, tokenizer):
 
 
 def main():
-    # # 1. Load SWE-Bench Verified from HuggingFace
-    # swe_bench_verified = fetch_swe_bench_verified()
+    # 1. Load SWE-Bench Verified from HuggingFace
+    swe_bench_verified = fetch_swe_bench_verified()
+
+    # 2. Extract `instance_id` and `problem_statement` from it
+    swe_bench_verified = swe_bench_verified.remove_columns(
+        [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
+    )
+
+    # 3. Setup embedding model (CodeT5-base) from HF
+    code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
+    code_t5.eval()
+
+    # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
+    # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
+    #                                             batched=True, batch_size=16, add_special_tokens=False)
     #
-    # # 2. Extract `instance_id` and `problem_statement` from it
-    # swe_bench_verified = swe_bench_verified.remove_columns(
-    #     [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
-    # )
-    #
-    # # 3. Setup embedding model (CodeT5-base) from HF
-    # code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
-    # code_t5.eval()
-    #
-    # # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
-    # # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
-    # #                                             batched=True, batch_size=16, add_special_tokens=False)
-    # #
-    # # swe_bench_verified = swe_bench_verified.map(_count_tokens, batched=True, batch_size=16)
-    #
-    # # 4. Generate embeddings for problem statements (use HF datasets instead of df here).
-    # generate_embedding_for_sample_fn = partial(
-    #     generate_embedding_for_sample,
-    #     tokenizer=code_t5_tokenizer,
-    #     model=code_t5)
-    #
-    # # swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
-    # # swe_bench_verified = swe_bench_verified.rename_column('embedding', 'vector')
-    # # swe_bench_verified = swe_bench_verified.add_column('id', [i for i in range(swe_bench_verified.num_rows)])
-    #
+    # swe_bench_verified = swe_bench_verified.map(_count_tokens, batched=True, batch_size=16)
+
+    # 4. Generate embeddings for problem statements (use HF datasets instead of df here).
+    generate_embedding_for_sample_fn = partial(
+        generate_embedding_for_sample,
+        tokenizer=code_t5_tokenizer,
+        model=code_t5)
+
+    swe_bench_verified = swe_bench_verified.map(generate_embedding_for_sample_fn, batched=False)
+    swe_bench_verified = swe_bench_verified.rename_column('embedding', 'vector')
+    swe_bench_verified = swe_bench_verified.add_column('id', [i for i in range(swe_bench_verified.num_rows)])
+    swe_bench_verified = swe_bench_verified.add_column('trajectory', [''] * swe_bench_verified.num_rows)
+
     # # 5.    i. Extract old trajectories of ACR in LLM format
     # #       ii. Populate df with trajectories
-    # # TODO get successful trajectories from ACR on SWE-Bench Lite
-    # #   Filter out astropy, pydata/xarray and pylint (broken)
-    # #   simply call the below on each of these repos from results/acr-val-only/new_eval_results/report.json
-    # #   Need to also open the correct final log file from results/acr-val-only/applicable_patch
-    # report_results = None
-    # excluded_repos = ['astropy', 'xarray', 'pylint']
-    # with open('../results/acr-val-only/new_eval_results/report.json') as f:
-    #     report_results = json.load(f)
-    #     resolved_repositories = report_results['resolved']
-    #     resolved_repositories = [repo for repo in resolved_repositories if not \
-    #         any(excluded_repo in repo for excluded_repo in excluded_repos)]
-    #
-    # # Load SWE-Bench Lite and process only resolved trajectories
-    # swe_bench_lite = fetch_swe_bench_lite()
-    # swe_bench_lite = swe_bench_lite.remove_columns(
-    #     [column for column in swe_bench_lite.column_names if column not in ['instance_id', 'problem_statement']]
-    # )
-    #
-    # swe_bench_lite = swe_bench_lite.map(generate_embedding_for_sample_fn, batched=False)
-    # swe_bench_lite = swe_bench_lite.rename_column('embedding', 'vector')
-    # swe_bench_lite = swe_bench_lite.add_column('id', [i for i in range(swe_bench_verified.num_rows, swe_bench_verified.num_rows + swe_bench_lite.num_rows)])
-    #
-    # if not report_results:
-    #     raise RuntimeError('Could not load report results, unable to initialize vector db with old ')
-    # for dirpath, dirnames, filenames in os.walk('../results/acr-val-only/applicable_patch'):
-    #     if any(excluded_repo in dirpath for excluded_repo in excluded_repos):
-    #         continue
-    #
-    #     agent_write_patch_files = [filename for filename in filenames if 'debug_agent_write_patch' in filename]
-    #     max_index = max([int(re.search(r'debug_agent_write_patch_(\d).json', file).group(1)) for file in agent_write_patch_files])
-    #     msg_thread = MessageThread.load_from_file(os.path.join(dirpath, f'debug_agent_write_patch_{max_index}.json'))
-    #     llm_trajectory = msg_thread.to_msg()
-    #
-    #     # TODO Add to vector db
-    #
+    resolved_instance_ids = None
+    excluded_repos = ['astropy', 'xarray', 'pylint']
+    with open('../results/acr-val-only/new_eval_results/report.json') as f:
+        resolved_instance_ids = json.load(f)
+        resolved_instance_ids = resolved_instance_ids['resolved']
+        resolved_instance_ids = [repo for repo in resolved_instance_ids if not \
+            any(excluded_repo in repo for excluded_repo in excluded_repos)]
+
+    # Load SWE-Bench Lite and process only resolved trajectories
+    swe_bench_lite = fetch_swe_bench_lite()
+    swe_bench_lite = swe_bench_lite.remove_columns(
+        [column for column in swe_bench_lite.column_names if column not in ['instance_id', 'problem_statement']]
+    )
+    swe_bench_lite = swe_bench_lite.filter(lambda example: example['instance_id'] in resolved_instance_ids)
+
+    swe_bench_lite = swe_bench_lite.map(generate_embedding_for_sample_fn, batched=False)
+    swe_bench_lite = swe_bench_lite.rename_column('embedding', 'vector')
+    swe_bench_lite = swe_bench_lite.add_column('id', [i for i in range(len(resolved_instance_ids))])
+    swe_bench_lite = swe_bench_lite.add_column('trajectory', [''] *  len(resolved_instance_ids))
+
+    if not resolved_instance_ids:
+        raise RuntimeError('Could not load report results, unable to initialize vector db with old ')
+
+    for dirpath, dirnames, filenames in os.walk('../results/acr-val-only/applicable_patch'):
+        if  any(excluded_repo in dirpath for excluded_repo in excluded_repos) or not filenames:
+            continue
+
+        instance_id = re.match('^([^_]*__[^_]*)', dirpath.split('/')[-1]).group(0)
+
+        if not instance_id in resolved_instance_ids:
+            continue
+
+        agent_write_patch_files = [filename for filename in filenames if 'debug_agent_write_patch' in filename]
+        max_index = max([int(re.search(r'debug_agent_write_patch_(\d).json', file).group(1)) for file in agent_write_patch_files])
+        msg_thread = MessageThread.load_from_file(os.path.join(dirpath, f'debug_agent_write_patch_{max_index}.json'))
+        llm_trajectory = json.dumps(msg_thread.to_msg())
+
+        swe_bench_lite = swe_bench_lite.map(lambda instance: {'trajectory': llm_trajectory} \
+            if instance['instance_id'] == instance_id else instance)
+
     # # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
-    # # TODO 7. Persist trajectory Milvus DB
-    # # TODO If I use SWE-Bench Lite trajectories I also need the SWE-Bench Lite problem statements and embeddings
-    # index_dimensions = code_t5.config.d_model
-    #
-    # client = MilvusClient('data/task_embeddings.db')
-    # client.create_collection(collection_name='task_embeddings', dimension=index_dimensions)
-    # client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_verified])
-    # client.insert(collection_name='task_embeddings', data=[dict(row) for row in swe_bench_lite])
+    index_dimensions = code_t5.config.d_model
+
+    client = MilvusClient('../data/task_embeddings.db')
+    client.create_collection(collection_name='swe_bench_verified', dimension=index_dimensions)
+    client.insert(collection_name='swe_bench_verified', data=[dict(row) for row in swe_bench_verified])
+
+    client.create_collection(collection_name='swe_bench_lite', dimension=index_dimensions)
+    client.insert(collection_name='swe_bench_lite', data=[dict(row) for row in swe_bench_lite])
 
     # SQL style filtering
     # Reading Note: Seems like it only returns limit // 2 samples, so just double it to 1000 to consider all
     # client.load_collection('task_embeddings')
 
-    # Reading Note: Read index in again
-    client = MilvusClient('../data/task_embeddings.db')
-    client.load_collection('task_embeddings')
-    client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
-    # Alternatively use get for direct access via index
+    # # Reading Note: Read index in again
+    # client = MilvusClient('../data/task_embeddings.db')
+    # client.load_collection('task_embeddings')
+    # client.query(collection_name='task_embeddings', limit=10, filter='instance_id LIKE "django%"')
+    # # Alternatively use get for direct access via index
 
 
 if __name__ == "__main__":
