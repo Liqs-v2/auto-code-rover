@@ -7,7 +7,7 @@ import json
 from app.data_structures import MessageThread
 import torch
 from datasets import load_dataset, Dataset
-from pymilvus import MilvusClient, Collection, connections
+from pymilvus import MilvusClient
 from transformers import AutoTokenizer, T5EncoderModel
 
 
