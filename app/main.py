@@ -14,6 +14,7 @@ from os.path import join as pjoin
 
 from loguru import logger
 
+from pymilvus import MilvusClient
 from app import globals, globals_mut, inference, log
 from app import utils as apputils
 from app.api.manage import ProjectApiManager
@@ -68,7 +69,6 @@ def get_args(
 
 
 def main(args, subparser_dest_attr_name: str = "command"):
-
     ## common options
     globals.output_dir = args.output_dir
     if globals.output_dir is not None:
@@ -467,7 +467,7 @@ def run_raw_task(
     run_ok = False
 
     try:
-        run_ok = do_inference(task.to_task(), task_output_dir, print_callback)
+        run_ok = do_inference(task.to_task(), task_output_dir, print_callback, task_id=task_id)
 
         if run_ok:
             run_status_message = f"Task {task_id} completed successfully."
@@ -511,6 +511,7 @@ def do_inference(
     python_task: Task,
     task_output_dir: str,
     print_callback: Callable[[dict], None] | None = None,
+    task_id: str = None,
 ) -> bool:
 
     apputils.create_dir_if_not_exists(task_output_dir)
@@ -532,11 +533,31 @@ def do_inference(
         if globals.only_save_sbfl_result:
             _, _, run_ok = api_manager.fault_localization()
         else:
+            # Reading Note will need to somehow get the exemplar here and pass it into run_one_task bc the prompt is being constructed inside and I need the instance_id to 
+            # query with the correct exemplar
+            client = MilvusClient('data/task_embeddings.db')
+            client.load_collection('swe_bench_lite')
+            client.load_collection('swe_bench_verified')
+            
+            # Get the instance_id from the task_id
+            query_sample = client.query(collection_name='swe_bench_verified', filter=f'instance_id LIKE "{task_id}"', limit=1)
+            
+            if len(query_sample) == 0:
+                log.log_and_always_print(f"Instance ID not found for task {task_id}. Not passing exemplar.")
+            else: 
+                most_task_similar_sample_id = client.search(collection_name='swe_bench_lite', data=[query_sample[0]['vector']], limit=1)[0][0]['id']
+                most_task_similar_sample = client.get(collection_name='swe_bench_lite', ids=[most_task_similar_sample_id])
+                exemplar = ('Below follows an example of how you have previously solved a similar task. IMPORTANT: The repository and details of your current task differ.\n' +
+                            'Github Issue description for repository ' + '/'.join(task_id.split('-')[0]) + ':\n' + most_task_similar_sample[0]['problem_statement'] + 
+                            'Your previous trajectory for this task was:\n' + most_task_similar_sample[0]['trajectory'])
+                log.log_and_always_print(f"Exemplar found for task {task_id}. Passing exemplar.")
+            
             run_ok = inference.run_one_task(
                 api_manager.output_dir,
                 api_manager,
                 python_task.get_issue_statement(),
                 print_callback,
+                exemplar=exemplar,
             )
 
             api_manager.dump_tool_call_sequence_to_file()

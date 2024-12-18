@@ -458,6 +458,7 @@ def run_one_task(
     api_manager: ProjectApiManager,
     problem_stmt: str,
     print_callback: Callable[[dict], None] | None = None,
+    exemplar:str = None
 ) -> bool:
     """
     Main entry point to run inference on one task.
@@ -470,11 +471,14 @@ def run_one_task(
     print_issue(problem_stmt)
     msg_thread = MessageThread()
 
+    # Reading Note: Prompt building starts here
     system_prompt = SYSTEM_PROMPT
     if (not globals.enable_layered) and common.SELECTED_MODEL.parallel_tool_call:
         # these models support parallel tool calls, let's try to make them not do it
         system_prompt += " In your response, DO NOT make more than one tool call."
 
+    msg_thread.add_user(exemplar)
+    
     msg_thread.add_system(system_prompt)
     original_prompt = prepare_issue_prompt(problem_stmt)
     msg_thread.add_user(original_prompt)
