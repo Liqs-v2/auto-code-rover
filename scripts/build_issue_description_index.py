@@ -126,6 +126,25 @@ def generate_embedding_for_sample(sample, model, tokenizer):
 
 
 def main():
+    # 1. Load SWE-Bench from HuggingFace
+    swe_bench_verified = fetch_swe_bench_verified()
+    swe_bench_lite = fetch_swe_bench_lite()
+
+    # 2. Extract `instance_id` and `problem_statement` from it
+    swe_bench_verified = swe_bench_verified.remove_columns(
+        [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
+    )
+    swe_bench_lite = swe_bench_lite.remove_columns(
+        [column for column in swe_bench_lite.column_names if column not in ['instance_id', 'problem_statement']]
+    )
+
+    # 3. Setup embedding model (CodeT5-base) from HF
+    code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
+    code_t5.eval()
+
+    index_dimensions = code_t5.config.d_model
+
+    # Set up vector database and create collections from schema
     client = MilvusClient('data/task_embeddings.db')
     schema = MilvusClient.create_schema(
         auto_id=False,
@@ -138,25 +157,43 @@ def main():
                      description="agent trajectory")
     schema.add_field(field_name="problem_statement", datatype=DataType.VARCHAR, max_length=65535,
                      description="github issue")
-    schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=768, description="embedding vector")
+    schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=768,
+                     description="problem statement embedding vector")
 
     # Create the collection
     client.create_collection(
-        collection_name="test",
+        collection_name="swe_bench_lite",
+        dimensions=index_dimensions,
+        schema=schema
+    )
+    client.create_collection(
+        collection_name="swe_bench_verified",
+        dimension=index_dimensions,
         schema=schema
     )
 
-    # 1. Load SWE-Bench Verified from HuggingFace
-    swe_bench_verified = fetch_swe_bench_verified()
-
-    # 2. Extract `instance_id` and `problem_statement` from it
-    swe_bench_verified = swe_bench_verified.remove_columns(
-        [column for column in swe_bench_verified.column_names if column not in ['instance_id', 'problem_statement']]
+    index_params = MilvusClient.prepare_index_params()
+    index_params.add_index(
+        field_name="vector",
+        metric_type="COSINE",
+        index_type="FLAT",
+        index_name="vector_index",
     )
 
-    # 3. Setup embedding model (CodeT5-base) from HF
-    code_t5, code_t5_tokenizer = fetch_embedding_model_and_tokenizer()
-    code_t5.eval()
+    # Create index for first collection
+    client.create_index(
+        collection_name="swe_bench_lite",
+        index_params=index_params,
+        sync=True
+    )
+
+    # Create index for second collection
+    client.create_index(
+        collection_name="swe_bench_verified",
+        index_params=index_params,
+        sync=True
+    )
+
 
     # Reading Note: Count tokens in problem statements to check context limit violations of embedder context limit
     # swe_bench_verified = swe_bench_verified.map(lambda batch: code_t5_tokenizer(batch['problem_statement']),
@@ -185,11 +222,7 @@ def main():
         resolved_instance_ids = [repo for repo in resolved_instance_ids if not \
             any(excluded_repo in repo for excluded_repo in excluded_repos)]
 
-    # Load SWE-Bench Lite and process only resolved trajectories
-    swe_bench_lite = fetch_swe_bench_lite()
-    swe_bench_lite = swe_bench_lite.remove_columns(
-        [column for column in swe_bench_lite.column_names if column not in ['instance_id', 'problem_statement']]
-    )
+    # Process only resolved trajectories
     swe_bench_lite = swe_bench_lite.filter(lambda example: example['instance_id'] in resolved_instance_ids)
 
     swe_bench_lite = swe_bench_lite.map(generate_embedding_for_sample_fn, batched=False)
@@ -217,25 +250,14 @@ def main():
         swe_bench_lite = swe_bench_lite.map(lambda instance: {'trajectory': llm_trajectory} \
             if instance['instance_id'] == instance_id else instance)
 
-    # # 6. Setup vector storage (just empty with right dims) and initialize with embeddings
-    index_dimensions = code_t5.config.d_model
-
-    client = MilvusClient('data/task_embeddings.db')
-    client.create_collection(collection_name='swe_bench_verified', dimension=index_dimensions)
+    # Populate vector db with data
     client.insert(collection_name='swe_bench_verified', data=[dict(row) for row in swe_bench_verified])
-
-    client.create_collection(collection_name='swe_bench_lite', dimension=index_dimensions)
     client.insert(collection_name='swe_bench_lite', data=[dict(row) for row in swe_bench_lite])
 
     # SQL style filtering
     # Reading Note: Seems like it only returns limit // 2 samples, so just double it to 1000 to consider all
-    # client.load_collection('task_embeddings')
 
     # Reading Note: Read index in again
-    client = MilvusClient('data/task_embeddings.db')
-    client.load_collection('swe_bench_verified')
-    client.load_collection('swe_bench_lite')
-
     client.get(collection_name='swe_bench_verified', ids=[0,499])
     client.get(collection_name='swe_bench_lite', ids=[0, 52])
 
