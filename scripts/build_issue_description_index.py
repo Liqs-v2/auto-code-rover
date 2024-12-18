@@ -7,7 +7,7 @@ import json
 from app.data_structures import MessageThread
 import torch
 from datasets import load_dataset, Dataset
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient, DataType, FieldSchema, CollectionSchema, Collection
 from transformers import AutoTokenizer, T5EncoderModel
 
 
@@ -126,6 +126,26 @@ def generate_embedding_for_sample(sample, model, tokenizer):
 
 
 def main():
+    client = MilvusClient('data/task_embeddings.db')
+    schema = MilvusClient.create_schema(
+        auto_id=False,
+    )
+
+    schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True, description="primary id")
+    schema.add_field(field_name="instance_id", datatype=DataType.VARCHAR, max_length=512,
+                     description="instance id name")
+    schema.add_field(field_name="trajectory", datatype=DataType.VARCHAR, max_length=65535,
+                     description="agent trajectory")
+    schema.add_field(field_name="problem_statement", datatype=DataType.VARCHAR, max_length=65535,
+                     description="github issue")
+    schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=768, description="embedding vector")
+
+    # Create the collection
+    client.create_collection(
+        collection_name="test",
+        schema=schema
+    )
+
     # 1. Load SWE-Bench Verified from HuggingFace
     swe_bench_verified = fetch_swe_bench_verified()
 
